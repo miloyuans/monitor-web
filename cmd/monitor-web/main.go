@@ -3,18 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
+	"github.com/swaggo/files"
+	"github.com/swaggo/gin-swagger"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+
+	_ "monitor-web/docs" // Import generated Swagger docs
 )
 
 // AlertEvent represents the structure of incoming alert events from monitor-service
@@ -67,9 +69,9 @@ type RedisAlert struct {
 // MySQLAlert is the MySQL-specific alerts table model
 type MySQLAlert struct {
 	Alert
-	DeadlocksIncrement  int64 `gorm:"default:0"`
+	DeadlocksIncrement   int64 `gorm:"default:0"`
 	SlowQueriesIncrement int64 `gorm:"default:0"`
-	Connections         int   `gorm:"default:0"`
+	Connections          int   `gorm:"default:0"`
 }
 
 // HostAlert is the Host-specific alerts table model
@@ -121,40 +123,12 @@ func main() {
 	// Initialize Gin router
 	r := gin.Default()
 
-	// Serve static files (Chart.js, CSS, etc.)
-	r.Static("/static", "./static")
-
-	// Load HTML templates
-	tmplPattern := "templates/*"
-	matches, err := filepath.Glob(tmplPattern)
-	if err != nil {
-		slog.Error("Failed to glob template pattern", "error", err, "pattern", tmplPattern, "component", "monitor-web")
-		os.Exit(1)
-	}
-	if len(matches) == 0 {
-		slog.Error("No template files found", "pattern", tmplPattern, "component", "monitor-web")
-		os.Exit(1)
-	}
-
-	// Register custom template function for JSON serialization
-	r.SetFuncMap(template.FuncMap{
-		"toJson": func(v interface{}) template.JS {
-			b, err := json.Marshal(v)
-			if err != nil {
-				slog.Error("Failed to marshal to JSON", "error", err, "component", "monitor-web")
-				return ""
-			}
-			return template.JS(b)
-		},
-	})
-
-	// Load templates
-	r.LoadHTMLGlob(tmplPattern)
-	slog.Info("Templates loaded successfully", "pattern", tmplPattern, "files", matches, "component", "monitor-web")
+	// Swagger endpoint
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// Routes
 	r.POST("/api/alerts", receiveAlert)
-	r.GET("/dashboard/:module", showDashboard)
+	r.GET("/api/alerts/:module", getAlerts)
 
 	// Start server
 	port := viper.GetString("WEB_PORT")
@@ -227,7 +201,17 @@ func initDB() (*gorm.DB, error) {
 	return db, nil
 }
 
-// receiveAlert handles incoming alert events and stores them in the database
+// receiveAlert godoc
+// @Summary Receive and store an alert event
+// @Description Handles incoming alert events and stores them in the appropriate database table based on the module.
+// @Tags alerts
+// @Accept json
+// @Produce json
+// @Param alert body AlertEvent true "Alert Event"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /api/alerts [post]
 func receiveAlert(c *gin.Context) {
 	var event AlertEvent
 	if err := c.ShouldBindJSON(&event); err != nil {
@@ -353,8 +337,21 @@ func receiveAlert(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "stored"})
 }
 
-// showDashboard renders the dashboard for a specific module
-func showDashboard(c *gin.Context) {
+// getAlerts godoc
+// @Summary Get alerts for a specific module
+// @Description Retrieves alerts and chart data for a given module, with optional filtering by date range and alert type.
+// @Tags alerts
+// @Accept json
+// @Produce json
+// @Param module path string true "Module name (e.g., redis, mysql, host, system, general)"
+// @Param from query string false "Start date (YYYY-MM-DD)"
+// @Param to query string false "End date (YYYY-MM-DD)"
+// @Param alert_type query string false "Alert type filter"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /api/alerts/{module} [get]
+func getAlerts(c *gin.Context) {
 	module := c.Param("module")
 	var alerts []map[string]interface{}
 	tableName := module + "_alerts"
@@ -407,7 +404,7 @@ func showDashboard(c *gin.Context) {
 		return
 	}
 
-	// Prepare chart data (for Chart.js)
+	// Prepare chart data
 	chartData := map[string]interface{}{
 		"labels": []string{},
 		"datasets": []map[string]interface{}{
@@ -450,10 +447,10 @@ func showDashboard(c *gin.Context) {
 	chartData["labels"] = labels
 	dataset["data"] = data
 
-	// Render template
-	c.HTML(http.StatusOK, "dashboard.tmpl", gin.H{
-		"Module":    module,
-		"Alerts":    alerts,
-		"ChartData": chartData,
+	// Marshal chartData to JSON string if needed, but since it's map, return directly
+	c.JSON(http.StatusOK, gin.H{
+		"module":    module,
+		"alerts":    alerts,
+		"chartData": chartData,
 	})
 }
