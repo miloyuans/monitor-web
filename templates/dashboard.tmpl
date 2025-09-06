@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Module | title}} Dashboard</title>
+    <script src="/static/chart.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .filters { margin-bottom: 20px; }
+        canvas { max-width: 800px; margin-top: 20px; }
+        h1 { color: #333; }
+        .filter-label { margin-right: 10px; }
+    </style>
+</head>
+<body>
+    <h1>{{.Module | title}} Dashboard</h1>
+    <div class="filters">
+        <label class="filter-label">From: <input type="date" id="from" value="{{.From}}"></label>
+        <label class="filter-label">To: <input type="date" id="to" value="{{.To}}"></label>
+        <label class="filter-label">Alert Type: 
+            <select id="alertType">
+                <option value="" {{if eq .AlertType ""}}selected{{end}}>All</option>
+                <option value="alert" {{if eq .AlertType "alert"}}selected{{end}}>Alert</option>
+                <option value="startup" {{if eq .AlertType "startup"}}selected{{end}}>Startup</option>
+                <option value="shutdown" {{if eq .AlertType "shutdown"}}selected{{end}}>Shutdown</option>
+            </select>
+        </label>
+        <button onclick="applyFilters()">Apply</button>
+    </div>
+    <canvas id="alertChart"></canvas>
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Event</th>
+                <th>Details</th>
+                <th>Host IP</th>
+                <th>Alert Type</th>
+                {{if eq .Module "redis"}}
+                <th>Big Keys</th>
+                <th>Failed Nodes</th>
+                {{else if eq .Module "mysql"}}
+                <th>Deadlocks</th>
+                <th>Slow Queries</th>
+                <th>Connections</th>
+                {{else if eq .Module "host"}}
+                <th>CPU Usage</th>
+                <th>Memory Remaining</th>
+                <th>Disk Usage</th>
+                {{else if eq .Module "system"}}
+                <th>Added Users</th>
+                <th>Removed Users</th>
+                <th>Added Processes</th>
+                <th>Removed Processes</th>
+                {{end}}
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Alerts}}
+            <tr>
+                <td>{{.timestamp}}</td>
+                <td>{{.event_name}}</td>
+                <td>{{.details}}</td>
+                <td>{{.host_ip}}</td>
+                <td>{{.alert_type}}</td>
+                {{if eq .Module "redis"}}
+                <td>{{if .big_keys_count}}{{.big_keys_count}}{{else}}0{{end}}</td>
+                <td>{{if .failed_nodes}}{{.failed_nodes}}{{else}}-{{end}}</td>
+                {{else if eq .Module "mysql"}}
+                <td>{{if .deadlocks_increment}}{{.deadlocks_increment}}{{else}}0{{end}}</td>
+                <td>{{if .slow_queries_increment}}{{.slow_queries_increment}}{{else}}0{{end}}</td>
+                <td>{{if .connections}}{{.connections}}{{else}}0{{end}}</td>
+                {{else if eq .Module "host"}}
+                <td>{{if .cpu_usage}}{{.cpu_usage | printf "%.2f"}}%{{else}}0%{{end}}</td>
+                <td>{{if .mem_remaining}}{{.mem_remaining | printf "%.2f"}}%{{else}}0%{{end}}</td>
+                <td>{{if .disk_usage}}{{.disk_usage | printf "%.2f"}}%{{else}}0%{{end}}</td>
+                {{else if eq .Module "system"}}
+                <td>{{if .added_users}}{{.added_users}}{{else}}-{{end}}</td>
+                <td>{{if .removed_users}}{{.removed_users}}{{else}}-{{end}}</td>
+                <td>{{if .added_processes}}{{.added_processes}}{{else}}-{{end}}</td>
+                <td>{{if .removed_processes}}{{.removed_processes}}{{else}}-{{end}}</td>
+                {{end}}
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <script>
+        // Initialize Chart.js
+        const chartData = {{.ChartData | toJson}};
+        const ctx = document.getElementById('alertChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: chartData,
+            options: {
+                responsive: true,
+                scales: {
+                    x: { title: { display: true, text: 'Date' } },
+                    y: { 
+                        title: { display: true, text: 'Alert Count' },
+                        beginAtZero: true,
+                        ticks: { stepSize: 1 }
+                    }
+                },
+                plugins: {
+                    legend: { display: true },
+                    title: { display: true, text: '{{.Module | title}} Alert Trends' }
+                }
+            }
+        });
+
+        // Apply filters
+        function applyFilters() {
+            const from = document.getElementById('from').value;
+            const to = document.getElementById('to').value;
+            const alertType = document.getElementById('alertType').value;
+            let url = '/dashboard/{{.Module}}';
+            const params = new URLSearchParams();
+            if (from) params.append('from', from);
+            if (to) params.append('to', to);
+            if (alertType) params.append('alert_type', alertType);
+            if (params.toString()) url += '?' + params.toString();
+            window.location.href = url;
+        }
+    </script>
+</body>
+</html>
