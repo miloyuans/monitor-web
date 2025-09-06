@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -16,27 +19,27 @@ import (
 
 // AlertEvent represents the structure of incoming alert events from monitor-service
 type AlertEvent struct {
-	Timestamp       time.Time `json:"timestamp"`
-	Module          string    `json:"module"`
-	ServiceName     string    `json:"service_name"`
-	EventName       string    `json:"event_name"`
-	Details         string    `json:"details"`
-	HostIP          string    `json:"host_ip"`
-	AlertType       string    `json:"alert_type"`
-	ClusterName     string    `json:"cluster_name"`
-	Hostname        string    `json:"hostname"`
-	BigKeysCount    *int      `json:"big_keys_count,omitempty"`      // Redis-specific
-	FailedNodes     *string   `json:"failed_nodes,omitempty"`        // Redis-specific
-	DeadlocksInc    *int64    `json:"deadlocks_increment,omitempty"` // MySQL-specific
-	SlowQueriesInc  *int64    `json:"slow_queries_increment,omitempty"`
-	Connections     *int      `json:"connections,omitempty"`
-	CPUUsage        *float64  `json:"cpu_usage,omitempty"`     // Host-specific
-	MemRemaining    *float64  `json:"mem_remaining,omitempty"`
-	DiskUsage       *float64  `json:"disk_usage,omitempty"`
-	AddedUsers      *string   `json:"added_users,omitempty"`    // System-specific
-	RemovedUsers    *string   `json:"removed_users,omitempty"`
-	AddedProcesses  *string   `json:"added_processes,omitempty"`
-	RemovedProcesses *string  `json:"removed_processes,omitempty"`
+	Timestamp        time.Time `json:"timestamp"`
+	Module           string    `json:"module"`
+	ServiceName      string    `json:"service_name"`
+	EventName        string    `json:"event_name"`
+	Details          string    `json:"details"`
+	HostIP           string    `json:"host_ip"`
+	AlertType        string    `json:"alert_type"`
+	ClusterName      string    `json:"cluster_name"`
+	Hostname         string    `json:"hostname"`
+	BigKeysCount     *int      `json:"big_keys_count,omitempty"`      // Redis-specific
+	FailedNodes      *string   `json:"failed_nodes,omitempty"`        // Redis-specific
+	DeadlocksInc     *int64    `json:"deadlocks_increment,omitempty"` // MySQL-specific
+	SlowQueriesInc   *int64    `json:"slow_queries_increment,omitempty"`
+	Connections      *int      `json:"connections,omitempty"`
+	CPUUsage         *float64  `json:"cpu_usage,omitempty"`     // Host-specific
+	MemRemaining     *float64  `json:"mem_remaining,omitempty"`
+	DiskUsage        *float64  `json:"disk_usage,omitempty"`
+	AddedUsers       *string   `json:"added_users,omitempty"`    // System-specific
+	RemovedUsers     *string   `json:"removed_users,omitempty"`
+	AddedProcesses   *string   `json:"added_processes,omitempty"`
+	RemovedProcesses *string   `json:"removed_processes,omitempty"`
 }
 
 // Alert is the general alerts table model
@@ -80,8 +83,8 @@ type HostAlert struct {
 // SystemAlert is the System-specific alerts table model
 type SystemAlert struct {
 	Alert
-	AddedUsers      string `gorm:"type:text"`
-	RemovedUsers    string `gorm:"type:text"`
+	AddedUsers       string `gorm:"type:text"`
+	RemovedUsers     string `gorm:"type:text"`
 	AddedProcesses   string `gorm:"type:text"`
 	RemovedProcesses string `gorm:"type:text"`
 }
@@ -121,8 +124,33 @@ func main() {
 	// Serve static files (Chart.js, CSS, etc.)
 	r.Static("/static", "./static")
 
-	// Load HTML templates (assuming templates are in ./templates)
-	r.LoadHTMLGlob("templates/*")
+	// Load HTML templates
+	tmplPattern := "templates/*"
+	matches, err := filepath.Glob(tmplPattern)
+	if err != nil {
+		slog.Error("Failed to glob template pattern", "error", err, "pattern", tmplPattern, "component", "monitor-web")
+		os.Exit(1)
+	}
+	if len(matches) == 0 {
+		slog.Error("No template files found", "pattern", tmplPattern, "component", "monitor-web")
+		os.Exit(1)
+	}
+
+	// Register custom template function for JSON serialization
+	r.SetFuncMap(template.FuncMap{
+		"toJson": func(v interface{}) template.JS {
+			b, err := json.Marshal(v)
+			if err != nil {
+				slog.Error("Failed to marshal to JSON", "error", err, "component", "monitor-web")
+				return ""
+			}
+			return template.JS(b)
+		},
+	})
+
+	// Load templates
+	r.LoadHTMLGlob(tmplPattern)
+	slog.Info("Templates loaded successfully", "pattern", tmplPattern, "files", matches, "component", "monitor-web")
 
 	// Routes
 	r.POST("/api/alerts", receiveAlert)
@@ -146,20 +174,29 @@ func initConfig() error {
 	viper.AutomaticEnv()
 
 	// Required environment variables
+	requiredVars := []string{"DB_NAME", "DB_USER"}
+	for _, v := range requiredVars {
+		if viper.GetString(v) == "" {
+			return fmt.Errorf("environment variable MONITOR_WEB_%s is required but not set", v)
+		}
+	}
+
+	// Set defaults for optional variables
 	viper.SetDefault("DB_HOST", "localhost")
 	viper.SetDefault("DB_PORT", "3306")
-	viper.SetDefault("DB_NAME", "monitor_db")
-	viper.SetDefault("DB_USER", "root")
 	viper.SetDefault("DB_PASS", "")
 	viper.SetDefault("WEB_PORT", "8080")
 
-	// Validate required fields
-	if viper.GetString("DB_NAME") == "" {
-		return fmt.Errorf("MONITOR_WEB_DB_NAME is required")
-	}
-	if viper.GetString("DB_USER") == "" {
-		return fmt.Errorf("MONITOR_WEB_DB_USER is required")
-	}
+	// Log loaded configuration (excluding sensitive data like DB_PASS)
+	slog.Info("Configuration loaded",
+		"DB_HOST", viper.GetString("DB_HOST"),
+		"DB_PORT", viper.GetString("DB_PORT"),
+		"DB_NAME", viper.GetString("DB_NAME"),
+		"DB_USER", viper.GetString("DB_USER"),
+		"WEB_PORT", viper.GetString("WEB_PORT"),
+		"component", "monitor-web",
+	)
+
 	return nil
 }
 
@@ -174,7 +211,7 @@ func initDB() (*gorm.DB, error) {
 		viper.GetString("DB_NAME"),
 	)
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true, // Avoid FK issues during migration
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
@@ -220,7 +257,6 @@ func receiveAlert(c *gin.Context) {
 	}
 
 	// Store in module-specific table
-	// Removed unnecessary transaction since Create is atomic
 	switch event.Module {
 	case "redis":
 		redisAlert := RedisAlert{
@@ -307,7 +343,6 @@ func receiveAlert(c *gin.Context) {
 			return
 		}
 	default:
-		// Fallback to general alerts table
 		if err := db.Create(&alert).Error; err != nil {
 			slog.Error("Failed to store general alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
@@ -324,7 +359,7 @@ func showDashboard(c *gin.Context) {
 	var alerts []map[string]interface{}
 	tableName := module + "_alerts"
 	if module == "general" {
-		tableName = "alerts" // Adjust for general table if needed
+		tableName = "alerts"
 	}
 
 	// Validate module
@@ -343,8 +378,8 @@ func showDashboard(c *gin.Context) {
 	}
 
 	// Query parameters for filtering
-	from := c.Query("from") // e.g., 2025-09-01
-	to := c.Query("to")     // e.g., 2025-09-06
+	from := c.Query("from")
+	to := c.Query("to")
 	alertType := c.Query("alert_type")
 
 	query := db.Table(tableName).Order("timestamp desc").Limit(100)
@@ -374,7 +409,7 @@ func showDashboard(c *gin.Context) {
 
 	// Prepare chart data (for Chart.js)
 	chartData := map[string]interface{}{
-		"labels":   []string{},
+		"labels": []string{},
 		"datasets": []map[string]interface{}{
 			{
 				"label":           "Alert Count",
