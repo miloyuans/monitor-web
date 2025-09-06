@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -219,11 +220,11 @@ func receiveAlert(c *gin.Context) {
 	}
 
 	// Store in module-specific table
-	tx := db.Begin()
+	// Removed unnecessary transaction since Create is atomic
 	switch event.Module {
 	case "redis":
 		redisAlert := RedisAlert{
-			Alert:       alert,
+			Alert:        alert,
 			BigKeysCount: 0,
 			FailedNodes:  "",
 		}
@@ -233,8 +234,7 @@ func receiveAlert(c *gin.Context) {
 		if event.FailedNodes != nil {
 			redisAlert.FailedNodes = *event.FailedNodes
 		}
-		if err := tx.Create(&redisAlert).Error; err != nil {
-			tx.Rollback()
+		if err := db.Create(&redisAlert).Error; err != nil {
 			slog.Error("Failed to store redis alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
 			return
@@ -255,8 +255,7 @@ func receiveAlert(c *gin.Context) {
 		if event.Connections != nil {
 			mysqlAlert.Connections = *event.Connections
 		}
-		if err := tx.Create(&mysqlAlert).Error; err != nil {
-			tx.Rollback()
+		if err := db.Create(&mysqlAlert).Error; err != nil {
 			slog.Error("Failed to store mysql alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
 			return
@@ -277,17 +276,16 @@ func receiveAlert(c *gin.Context) {
 		if event.DiskUsage != nil {
 			hostAlert.DiskUsage = *event.DiskUsage
 		}
-		if err := tx.Create(&hostAlert).Error; err != nil {
-			tx.Rollback()
+		if err := db.Create(&hostAlert).Error; err != nil {
 			slog.Error("Failed to store host alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
 			return
 		}
 	case "system":
 		systemAlert := SystemAlert{
-			Alert:           alert,
-			AddedUsers:      "",
-			RemovedUsers:    "",
+			Alert:            alert,
+			AddedUsers:       "",
+			RemovedUsers:     "",
 			AddedProcesses:   "",
 			RemovedProcesses: "",
 		}
@@ -303,22 +301,19 @@ func receiveAlert(c *gin.Context) {
 		if event.RemovedProcesses != nil {
 			systemAlert.RemovedProcesses = *event.RemovedProcesses
 		}
-		if err := tx.Create(&systemAlert).Error; err != nil {
-			tx.Rollback()
+		if err := db.Create(&systemAlert).Error; err != nil {
 			slog.Error("Failed to store system alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
 			return
 		}
 	default:
 		// Fallback to general alerts table
-		if err := tx.Create(&alert).Error; err != nil {
-			tx.Rollback()
+		if err := db.Create(&alert).Error; err != nil {
 			slog.Error("Failed to store general alert", "error", err, "component", "monitor-web")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store alert"})
 			return
 		}
 	}
-	tx.Commit()
 	slog.Info("Stored alert", "module", event.Module, "event_name", event.EventName, "component", "monitor-web")
 	c.JSON(http.StatusOK, gin.H{"status": "stored"})
 }
@@ -328,6 +323,9 @@ func showDashboard(c *gin.Context) {
 	module := c.Param("module")
 	var alerts []map[string]interface{}
 	tableName := module + "_alerts"
+	if module == "general" {
+		tableName = "alerts" // Adjust for general table if needed
+	}
 
 	// Validate module
 	validModules := []string{"redis", "mysql", "host", "system", "general", "rabbitmq", "nacos"}
@@ -353,11 +351,15 @@ func showDashboard(c *gin.Context) {
 	if from != "" {
 		if t, err := time.Parse("2006-01-02", from); err == nil {
 			query = query.Where("timestamp >= ?", t)
+		} else {
+			slog.Warn("Invalid 'from' date format", "from", from, "component", "monitor-web")
 		}
 	}
 	if to != "" {
 		if t, err := time.Parse("2006-01-02", to); err == nil {
 			query = query.Where("timestamp <= ?", t)
+		} else {
+			slog.Warn("Invalid 'to' date format", "to", to, "component", "monitor-web")
 		}
 	}
 	if alertType != "" {
@@ -372,7 +374,7 @@ func showDashboard(c *gin.Context) {
 
 	// Prepare chart data (for Chart.js)
 	chartData := map[string]interface{}{
-		"labels": []string{},
+		"labels":   []string{},
 		"datasets": []map[string]interface{}{
 			{
 				"label":           "Alert Count",
@@ -383,6 +385,7 @@ func showDashboard(c *gin.Context) {
 			},
 		},
 	}
+
 	// Aggregate alerts by day for chart
 	dayCounts := make(map[string]int)
 	for _, alert := range alerts {
@@ -393,15 +396,24 @@ func showDashboard(c *gin.Context) {
 		day := ts.Format("2006-01-02")
 		dayCounts[day]++
 	}
+
+	// Sort days
 	var days []string
 	for day := range dayCounts {
 		days = append(days, day)
 	}
 	sort.Strings(days)
+
+	// Populate chart data
+	labels := chartData["labels"].([]string)
+	dataset := chartData["datasets"].([]map[string]interface{})[0]
+	data := dataset["data"].([]int)
 	for _, day := range days {
-		chartData["labels"] = append(chartData["labels"], day)
-		chartData["datasets"].( []map[string]interface{})[0]["data"] = append(chartData["datasets"].( []map[string]interface{})[0]["data"], dayCounts[day])
+		labels = append(labels, day)
+		data = append(data, dayCounts[day])
 	}
+	chartData["labels"] = labels
+	dataset["data"] = data
 
 	// Render template
 	c.HTML(http.StatusOK, "dashboard.tmpl", gin.H{
